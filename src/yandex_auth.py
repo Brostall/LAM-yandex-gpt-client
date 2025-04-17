@@ -1,65 +1,73 @@
 import os
 import json
 import requests
-import jwt  # Добавляем импорт JWT
+import jwt
 from datetime import datetime, timedelta
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
+import logging
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
 
-def get_service_account_token(sa_key_file: str) -> Optional[Dict]:
+def get_service_account_token(sa_key_file: str) -> Optional[str]:
     """
-    Получает IAM токен используя ключ сервисного аккаунта
+    Получает IAM токен с помощью ключа сервисного аккаунта
+    
+    Args:
+        sa_key_file (str): путь к файлу с ключом сервисного аккаунта
+        
+    Returns:
+        Optional[str]: IAM токен или None в случае ошибки
     """
     try:
         with open(sa_key_file, 'r') as f:
             sa_key = json.load(f)
-        
-        # Проверяем наличие необходимых полей
-        required_fields = ['id', 'service_account_id', 'private_key']
-        for field in required_fields:
-            if field not in sa_key:
-                print(f"Ошибка: В файле ключа нет поля {field}")
-                return None
             
-        # Создаем JWT
+        # Загружаем приватный ключ
+        private_key = serialization.load_pem_private_key(
+            sa_key['private_key'].encode(),
+            password=None,
+            backend=default_backend()
+        )
+            
         now = datetime.utcnow()
-        jwt_payload = {
+        payload = {
             'aud': 'https://iam.api.cloud.yandex.net/iam/v1/tokens',
             'iss': sa_key['service_account_id'],
             'iat': now,
             'exp': now + timedelta(hours=1)
         }
 
-        # Добавляем заголовок с kid
-        jwt_headers = {
-            'kid': sa_key['id']
-        }
-
-        # Подписываем JWT приватным ключом
+        # Подписываем JWT используя закрытый ключ
         encoded_jwt = jwt.encode(
-            jwt_payload,
-            sa_key['private_key'],
+            payload,
+            private_key,
             algorithm='PS256',
-            headers=jwt_headers  # Добавляем заголовки
+            headers={'kid': sa_key['id']}
         )
             
         url = "https://iam.api.cloud.yandex.net/iam/v1/tokens"
-        payload = {
-            "jwt": encoded_jwt
-        }
+        response = requests.post(url, json={"jwt": encoded_jwt})
+        response.raise_for_status()
         
-        print(f"Отправляем запрос на получение токена...")
-        response = requests.post(url, json=payload)
-        
-        if response.status_code != 200:
-            print(f"Ошибка {response.status_code}: {response.text}")
+        result = response.json()
+        if 'iamToken' in result:
+            logging.info("IAM токен успешно получен")
+            return result['iamToken']
+        else:
+            logging.error(f"Ошибка в ответе IAM API: {result}")
             return None
             
-        return response.json()
-    except json.JSONDecodeError as e:
-        print(f"Ошибка при чтении JSON файла: {e}")
+    except FileNotFoundError:
+        logging.error(f"Файл с ключом сервисного аккаунта не найден: {sa_key_file}")
+        return None
+    except json.JSONDecodeError:
+        logging.error(f"Ошибка при чтении файла с ключом сервисного аккаунта")
+        return None
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Ошибка при запросе к IAM API: {e}")
         return None
     except Exception as e:
-        print(f"Неожиданная ошибка при получении токена: {e}")
+        logging.error(f"Неожиданная ошибка при получении IAM токена: {e}")
         return None
 
 if __name__ == "__main__":
@@ -73,6 +81,6 @@ if __name__ == "__main__":
     result = get_service_account_token(sa_key_file)
     if result:
         print("IAM токен успешно получен:")
-        print(result['iamToken'])
+        print(result)
     else:
         print("Не удалось получить IAM токен") 
